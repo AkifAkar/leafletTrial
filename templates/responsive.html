@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Fullscreen Leaflet Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([39.891, 32.785], 50); // Example coordinates
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+    //var marker = L.marker([39.891966105144206, 32.78552190849641]).addTo(map);
+    const lat = 39.891966105144206;
+    const lng = 32.78552190849641;
+
+    // Add a circle to show the accuracy range
+    const accuracyCircle = L.circle([lat, lng], {
+        radius: 50, // in meters
+        color: null,
+        fillColor: 'rgba(0, 136, 255, 0.3)', // light blue
+        fillOpacity: 0.5,
+        stroke: false
+    }).addTo(map);
+
+    // Add a small blue dot as the position marker
+    const blueDot = L.circleMarker([lat, lng], {
+        radius: 6,
+        color: '#0088ff',
+        fillColor: '#0088ff',
+        fillOpacity: 1
+    }).addTo(map);
+  </script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pi Zero Stream — {{ camera_id }}</title>
+  <style>
+    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #000; }
+    video { width: 80vw; height: auto; object-fit: contain; }
+  </style>
+  <!-- use a CDN instead of local node_modules -->
+  <script type="importmap">
+  {
+    "imports": {
+      "picamera.js": "https://unpkg.com/picamera.js/dist/picamera.esm.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <video id="videoElement" autoplay playsinline muted></video>
+
+  <script type="module">
+    import { PiCamera } from 'picamera.js';
+
+    const videoEl = document.getElementById('videoElement');
+    const conn = new PiCamera({
+      deviceUid:   '{{ camera_id }}',      // camera1, camera2, etc.
+      mqttHost:    '10.42.0.1',            // adjust to your broker IP
+      mqttProtocol:'ws',
+      mqttPort:     1884,
+      mqttPath:     '/',                   // or '/mqtt' if you proxy
+      stunUrls:    ['stun:stun.l.google.com:19302'],
+      isMicOn:     false,
+      isSpeakerOn: false
+    });
+
+    conn.onStream = stream => {
+      videoEl.srcObject = stream ?? null;
+    };
+    conn.connect();
+  </script>
+</body>
+</html>

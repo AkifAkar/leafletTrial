@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ROS 2 GPS → Leaflet</title>
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- roslibjs -->
+  <script src="https://unpkg.com/roslib/build/roslib.min.js"></script>
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // 1️⃣ Start ros2-web-bridge separately:
+    //    $ ros2-web-bridge
+    //
+    // 2️⃣ Connect over WebSocket to it:
+    const ros = new ROSLIB.Ros({
+      url: 'ws://' + window.location.hostname + ':9090'
+    });
+
+    ros.on('connection', () => console.log('✅ Connected to ROS bridge'));
+    ros.on('error', (e) => console.error('❌ ROS bridge error:', e));
+    ros.on('close', () => console.log('⚠️ ROS bridge closed'));
+
+    // 3️⃣ Init a Leaflet map:
+    let firstFix = true;
+
+  // 1️⃣ Initialize at world view (so you don’t assume a start coord)
+  const map = L.map('map').setView([0, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+
+  // 2️⃣ Place your marker
+  const marker = L.marker([0, 0]).addTo(map);
+
+  // 3️⃣ Subscribe to GPS topic
+  const gpsTopic = new ROSLIB.Topic({
+    ros,
+    name: '/gps/fix',
+    messageType: 'sensor_msgs/NavSatFix'
+  });
+
+  gpsTopic.subscribe((msg) => {
+    const lat = msg.latitude,
+          lon = msg.longitude;
+
+    // Always move the marker
+    marker.setLatLng([lat, lon]);
+
+    if (firstFix) {
+      // 🔍 Zoom in once at level 16
+      map.setView([lat, lon], 20);
+      firstFix = false;
+    }
+    else if (!map.getBounds().contains([lat, lon])) {
+      // ↗️ Only pan if marker leaves current view
+      map.panTo([lat, lon]);
+    }
+  });
+
+
+  </script>
+</body>
+</html>
