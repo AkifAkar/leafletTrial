@@ -2,42 +2,570 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Pi Zero Stream — {{ camera_id }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pi Stream — {{ camera_id }}</title>
   <style>
-    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #000; }
-    video { width: 80vw; height: auto; object-fit: contain; }
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; background: #000; color: #ddd;
+      font: 14px/1.4 system-ui, sans-serif;
+      display: flex; flex-direction: column; height: 100vh;
+    }
+
+    #stage { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    /* width/height 100% (not max-*) so the picture fills the page whatever
+       resolution arrives — WebRTC rescales the stream on its own, and max-width
+       would leave a 480x270 track rendering postage-stamp sized in the middle
+       of a black page. object-fit keeps the aspect ratio. */
+    video {
+      width: 100%; height: 100%;
+      object-fit: contain; display: block; background: #000;
+    }
+    /* No transition on this. An animated transform only advances while the page
+       is actually painting, so a backgrounded or throttled tab can leave the
+       picture unrotated while the button reads "on" — a cosmetic flourish is
+       not worth a control that silently lies. */
+    video.flipped { transform: rotate(180deg); }
+
+    /* Settings live in a panel that collapses, so a small window is nearly all
+       stream. The status strip below stays put and is deliberately tiny. */
+    #panel {
+      display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+      padding: 8px 10px; background: #141414; border-top: 1px solid #2a2a2a;
+    }
+    #panel[hidden] { display: none; }
+    label { display: flex; gap: 5px; align-items: center; color: #999; font-size: 13px; }
+    select, button {
+      background: #222; color: #ddd; border: 1px solid #3a3a3a;
+      border-radius: 4px; padding: 4px 9px; font: inherit; font-size: 13px;
+    }
+    button { cursor: pointer; }
+    button:hover:not(:disabled) { background: #2d2d2d; }
+    button:disabled, select:disabled { opacity: .5; cursor: default; }
+    #flip.on { background: #2d4a6b; border-color: #3d6a9b; }
+
+    #bar {
+      display: flex; gap: 10px; align-items: center;
+      padding: 2px 8px; background: #101010; border-top: 1px solid #222;
+      font-size: 11px; line-height: 18px; color: #777;
+      font-variant-numeric: tabular-nums;
+    }
+    #toggle, #shot {
+      padding: 0 5px; font-size: 11px; line-height: 16px;
+      border-color: #2a2a2a; background: transparent; color: #888;
+    }
+    #shot { font-size: 12px; }
+    #shot:disabled { opacity: .35; }
+    .pill { display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #666; flex: none; }
+    .dot.ok { background: #3fb950; }
+    .dot.warn { background: #d29922; }
+    .dot.bad { background: #f85149; }
+    #right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+    #temp.warn { color: #d29922; }
+    #temp.bad { color: #f85149; font-weight: 600; }
+    #note {
+      padding: 4px 10px; background: #1a1408; color: #d29922; font-size: 12px;
+    }
+    #note:empty { display: none; padding: 0; }
+    /* Truncate rather than wrap: a long name must not push the strip taller. */
+    #camText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34vw; }
   </style>
-  <!-- use a CDN instead of local node_modules -->
+  <!-- Vendored locally, not from a CDN: the Pi network is isolated, and loading
+       picamera.js over the internet meant the page broke the moment the laptop
+       lost its wifi uplink. -->
   <script type="importmap">
   {
     "imports": {
-      "picamera.js": "https://unpkg.com/picamera.js/dist/picamera.esm.js"
+      "picamera.js": "{{ url_for('static', filename='picamera/picamera.esm.js') }}"
     }
   }
   </script>
 </head>
 <body>
-  <video id="videoElement" autoplay playsinline muted></video>
+  <div id="stage">
+    <video id="videoElement" autoplay playsinline muted></video>
+  </div>
+
+  <div id="note"></div>
+
+  <div id="panel" hidden>
+    <label>Resolution <select id="preset"></select></label>
+    <label>FPS <select id="fps"></select></label>
+    <button id="apply">Apply</button>
+    <button id="restart" title="Re-detect and restart every camera on this Pi">Restart all cameras</button>
+    <button id="flip" title="Rotate the picture 180°">Rotate 180°</button>
+  </div>
+
+  <div id="bar">
+    <button id="toggle" title="Show/hide settings">⚙ settings</button>
+    <button id="shot" title="Save the current frame (S)">📷</button>
+    <span class="pill"><span class="dot" id="camDot"></span><span id="camText">camera —</span></span>
+    <div id="right">
+      <span id="temp" title="Pi CPU temperature"></span>
+      <span id="actual"></span>
+      <span class="pill"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></span>
+    </div>
+  </div>
 
   <script type="module">
     import { PiCamera } from 'picamera.js';
 
-    const videoEl = document.getElementById('videoElement');
-    const conn = new PiCamera({
-      deviceUid:   '{{ camera_id }}',      // camera1, camera2, etc.
-      mqttHost:    '10.42.0.1',            // adjust to your broker IP
-      mqttProtocol:'ws',
-      mqttPort:     1884,
-      mqttPath:     '/',                   // or '/mqtt' if you proxy
-      stunUrls:    ['stun:stun.l.google.com:19302'],
-      isMicOn:     false,
-      isSpeakerOn: false
+    const UID = '{{ camera_id }}';
+    // ?codec=VP8 / VP9 / AV1 for comparing. H264 is the cheapest for the Pi to
+    // encode in software, which is all a Pi 5 has (no hardware encoder).
+    const params = new URLSearchParams(location.search);
+    const CODEC = params.get('codec') || 'H264';
+    // Off by default (LAN needs no STUN); ?stun=stun:host:port to opt back in.
+    const STUN = params.get('stun') || '';
+
+    const videoEl  = document.getElementById('videoElement');
+    const presetEl = document.getElementById('preset');
+    const fpsEl    = document.getElementById('fps');
+    const applyEl  = document.getElementById('apply');
+    const restartEl = document.getElementById('restart');
+    const flipEl   = document.getElementById('flip');
+    const panelEl  = document.getElementById('panel');
+    const toggleEl = document.getElementById('toggle');
+    const noteEl   = document.getElementById('note');
+
+    const setPill = (dot, text, cls, msg) => {
+      document.getElementById(dot).className = 'dot ' + (cls || '');
+      document.getElementById(text).textContent = msg;
+    };
+    const note = msg => { noteEl.textContent = msg || ''; };
+
+    let modes = [];   // whatever v4l2 says this camera really supports
+
+    // Two independent reasons the controls can be dead — an action in flight,
+    // or a camera with nothing to offer. Tracked separately so that neither can
+    // be mistaken for the other: reading them back off `disabled` would stall
+    // the poll loop on an unplugged camera and never recover.
+    let busy = false;
+    let usable = false;
+
+    function refreshControls() {
+      const off = busy || !usable;
+      applyEl.disabled = presetEl.disabled = fpsEl.disabled = off;
+      restartEl.disabled = busy;    // restarting is worth trying with no modes
+    }
+
+    // ---- view preferences (per camera) -----------------------------------
+    const pref = (key, val) => {
+      if (val === undefined) return localStorage.getItem(`${UID}.${key}`);
+      localStorage.setItem(`${UID}.${key}`, val);
+    };
+
+    const setFlipped = on => {
+      videoEl.classList.toggle('flipped', on);
+      flipEl.classList.toggle('on', on);
+      pref('flip', on ? '1' : '0');
+    };
+    // Rotating in CSS rather than with pi-webrtc's --rotation: the v4l2 rotate
+    // control is not supported on these cameras (it logs "Unable to set the
+    // rotation angle"), and doing it here costs nothing and needs no restart.
+    flipEl.addEventListener('click', () => setFlipped(!videoEl.classList.contains('flipped')));
+    setFlipped(pref('flip') === '1');
+
+    const setPanel = open => {
+      panelEl.hidden = !open;
+      toggleEl.textContent = open ? '⚙ hide' : '⚙ settings';
+      pref('panel', open ? '1' : '0');
+    };
+    toggleEl.addEventListener('click', () => setPanel(panelEl.hidden));
+    setPanel(pref('panel') === '1');
+
+    // ---- stream ----------------------------------------------------------
+    // Applying a config restarts pi-webrtc on the Pi, so the peer connection
+    // always drops on change. Reconnecting is a normal path here, not an error.
+    let conn = null;
+    let retryTimer = null;
+    let attempt = 0;
+    let stopped = false;
+    let blankTimer = null;
+
+    function teardown() {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (blankTimer) { clearTimeout(blankTimer); blankTimer = null; }
+      const cam = conn;
+      // Drop the reference *before* terminating. terminate() fires
+      // onConnectionState('closed'), and those handlers check `conn === cam` —
+      // so clearing it first makes the dying peer's events no-ops. Without this
+      // the close schedules a reconnect, which tears down the connection we are
+      // about to open, once a second, forever. Every reconnect also resets
+      // WebRTC's quality ramp, so the picture never climbs past its low rungs.
+      conn = null;
+      if (cam) { try { cam.terminate(); } catch (_) {} }
+      videoEl.srcObject = null;
+    }
+
+    function scheduleReconnect() {
+      if (stopped || retryTimer) return;
+      // Capped low: a restart is the common case, so retries should stay snappy
+      // rather than backing off to 15s against a Pi that is seconds from ready.
+      const delay = Math.min(1000 * 2 ** attempt, 5000);
+      attempt++;
+      setPill('connDot', 'connText', 'warn', `retrying ${Math.round(delay / 1000)}s`);
+      retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay);
+    }
+
+    // The browser blocks WebRTC entirely when it believes it is offline, even
+    // though the Pi is reachable on the LAN. Firefox/Chromium tie "online" to
+    // whether the OS reports internet connectivity, and with wifi off and only
+    // the Pi link up, NetworkManager reports none — so RTCPeerConnection throws
+    // "network is down". There is nothing the page can do to force it; all we
+    // can do is say so clearly instead of looping on an exception.
+    function offlineHelp() {
+      return 'The browser thinks it is offline, so it is refusing WebRTC even '
+           + 'though the Pi is reachable. This is the OS connectivity check, not '
+           + 'the camera. Fix on the laptop: disable NetworkManager\'s check '
+           + '(see deploy note), or in Firefox set '
+           + 'network.manage-offline-status = false. MQTT is connected; only the '
+           + 'video is blocked.';
+    }
+
+    function connect() {
+      if (stopped) return;
+      teardown();
+
+      if (!navigator.onLine) {
+        setPill('connDot', 'connText', 'bad', 'browser offline');
+        note(offlineHelp());
+        scheduleReconnect();     // keep trying; it recovers when the OS does
+        return;
+      }
+      setPill('connDot', 'connText', 'warn', 'connecting…');
+
+      const cam = new PiCamera({
+        deviceUid:    UID,
+        mqttHost:     '{{ mqtt_host }}',
+        mqttProtocol: 'ws',
+        mqttPort:     1884,
+        mqttPath:     '/',
+        // No STUN: the browser and Pi are on the same subnet, so host
+        // candidates connect them directly. A public STUN server (Google's) is
+        // only for peers across the internet, and pointing at one meant ICE
+        // stalled on an unreachable server whenever the laptop was offline.
+        // Set ?stun=stun:host:port in the URL if you ever need it.
+        ...(STUN ? { stunUrls: [STUN] } : {}),
+        isMicOn:      false,
+        isSpeakerOn:  false,
+        // Default is 10s. That is a long time to sit on a dead attempt after a
+        // restart; failing sooner and retrying costs less than waiting.
+        timeout:      5000,
+        codec:        CODEC,
+      });
+      conn = cam;
+      // Debug handle. Diagnosing this stream means reading getStats(), and
+      // there is no other way to reach the peer from the console.
+      window.__cam = cam;
+
+      // Every handler ignores events from a peer that is no longer the current
+      // one. A terminated peer keeps emitting as it winds down, and acting on
+      // that would tear down its replacement.
+      const isCurrent = () => conn === cam;
+
+      cam.onStream = stream => {
+        if (isCurrent()) videoEl.srcObject = stream ?? null;
+      };
+
+      cam.onConnectionState = state => {
+        if (!isCurrent()) return;
+        if (state === 'connected') {
+          attempt = 0;
+          setPill('connDot', 'connText', 'ok', 'connected');
+          // Clear the offline explanation once we are actually back.
+          if (noteEl.textContent.startsWith('The browser thinks it is offline')) note('');
+          // pi-webrtc answers and the peer connects even when it never opened
+          // the camera — so "connected" alone is not proof of a picture. With
+          // several cameras this is the normal way a USB power limit shows up.
+          if (blankTimer) clearTimeout(blankTimer);
+          blankTimer = setTimeout(() => {
+            if (isCurrent() && !videoEl.videoWidth) {
+              setPill('connDot', 'connText', 'bad', 'no video');
+              note('Connected, but no frames are arriving. The camera is probably '
+                 + 'not powered — several USB cameras can exceed the Pi\'s current limit. '
+                 + 'Check its LED, and journalctl -u pi-webrtc@' + UID + ' on the Pi.');
+            }
+          }, 8000);
+        } else if (state === 'connecting') {
+          setPill('connDot', 'connText', 'warn', 'connecting…');
+        } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+          setPill('connDot', 'connText', 'bad', state);
+          scheduleReconnect();
+        }
+      };
+
+      cam.onTimeout = () => {           // picamera.js already terminated by now
+        if (!isCurrent()) return;
+        conn = null;
+        setPill('connDot', 'connText', 'bad', 'timed out');
+        scheduleReconnect();
+      };
+
+      // connect() rejects with a DOMException when the browser is offline.
+      // Without catching it that surfaces as an uncaught promise rejection on
+      // every retry; handle it as the same offline case.
+      Promise.resolve().then(() => cam.connect()).catch(err => {
+        if (!isCurrent()) return;
+        const offline = !navigator.onLine || /network is down/i.test(err && err.message);
+        setPill('connDot', 'connText', 'bad', offline ? 'browser offline' : 'error');
+        note(offline ? offlineHelp() : `Connect failed: ${err && err.message || err}`);
+        scheduleReconnect();
+      });
+    }
+
+    // WebRTC rescales the stream on its own, so what arrives is often below what
+    // was asked for. Showing the real track size keeps that visible instead of
+    // hiding it behind a stretched picture.
+    const showActual = () => {
+      const { videoWidth: w, videoHeight: h } = videoEl;
+      document.getElementById('actual').textContent = w ? `${w}×${h}` : '';
+      if (w && noteEl.textContent.startsWith('Connected, but no frames')) note('');
+    };
+    videoEl.addEventListener('resize', showActual);
+    videoEl.addEventListener('emptied', () => { document.getElementById('actual').textContent = ''; });
+
+    // ---- config ----------------------------------------------------------
+    const pollState = () => fetch(`/api/camera/${UID}/config`).then(r => r.json());
+
+    function paintFpsOptions() {
+      const mode = modes.find(m => m.preset === presetEl.value);
+      const want = Number(fpsEl.value);
+      fpsEl.innerHTML = '';
+      (mode ? mode.fps : []).forEach(f => {
+        const o = document.createElement('option');
+        o.value = f; o.textContent = f;
+        fpsEl.appendChild(o);
+      });
+      // Keep the current choice across a resolution change when it still exists.
+      if (mode && mode.fps.includes(want)) fpsEl.value = String(want);
+    }
+
+    function paintModes(state) {
+      const next = state.modes || [];
+      const changed = JSON.stringify(next) !== JSON.stringify(modes);
+      modes = next;
+      if (changed) {
+        presetEl.innerHTML = '';
+        modes.forEach(m => {
+          const o = document.createElement('option');
+          o.value = m.preset; o.textContent = m.preset;
+          presetEl.appendChild(o);
+        });
+      }
+      if (state.config) {
+        if (modes.some(m => m.preset === state.config.preset)) presetEl.value = state.config.preset;
+        paintFpsOptions();
+        if (state.config.fps) fpsEl.value = String(state.config.fps);
+      } else if (changed) {
+        paintFpsOptions();
+      }
+      usable = modes.length > 0;
+      refreshControls();
+    }
+
+    function paintStatus(state) {
+      if (state.online) {
+        // Identical cameras report identical names, so show the USB port too —
+        // it is the only thing on screen that says which physical camera this
+        // is. "unpinned" means the uid follows probe order and could land on a
+        // different camera after a reboot; CAMERA_PORTS on the Pi fixes that.
+        const port = state.port ? ` · ${state.port}${state.pinned ? '' : '?'}` : '';
+        setPill('camDot', 'camText', 'ok', (state.name || 'camera') + port);
+        document.getElementById('camText').title =
+          `${state.name || ''} on ${state.device || '?'}` +
+          (state.port ? `, USB port ${state.port}` : '') +
+          (state.port && !state.pinned
+            ? '\n"?" = not pinned: this uid follows USB probe order and may point at a '
+              + 'different camera after a reboot, or if another camera fails to power up. '
+              + 'Set CAMERA_PORTS in /etc/pi-webrtc/device.env to fix it.'
+            : '');
+      } else if (state.host && state.host.online) {
+        setPill('camDot', 'camText', 'bad', 'not detected');
+        document.getElementById('camText').title =
+          'The Pi is up but did not find this camera. If it is plugged in, it may have '
+          + 'failed to power up — try "Restart all cameras", which re-runs detection.';
+      } else if (state.config) {
+        setPill('camDot', 'camText', 'bad', 'pi offline');
+        document.getElementById('camText').title = '';
+      } else {
+        setPill('camDot', 'camText', '', 'camera —');
+        document.getElementById('camText').title = '';
+      }
+
+      // Sustained software encoding will hit the Pi's thermal ceiling long
+      // before it runs out of anything else, and throttling is invisible from
+      // the video alone.
+      const el = document.getElementById('temp');
+      const host = state.host || {};
+      const t = host.temp_c;
+      const th = host.throttle || {};
+      const v = host.ext5v;
+      if (t == null && v == null) { el.textContent = ''; el.className = ''; return; }
+
+      const bits = [];
+      if (t != null) bits.push(`${t}°`);
+      // The rail as the Pi measures it, after the drop across the wiring. On a
+      // regulator-fed robot this is the number that predicts a brownout, and
+      // the Pi cannot tell you about one after it has already shut down.
+      if (v != null) bits.push(`${v.toFixed(2)}V`);
+      if (th.throttled) bits.push('thr');
+      if (th.undervoltage) bits.push('UV');
+      if (host.online === false) bits.push('· last seen');
+      el.textContent = bits.join(' ');
+
+      // 4.75V is the bottom of the Pi's 5V ±5% spec; below that it is on
+      // borrowed time, so warn well before it actually falls over.
+      const lowVolts = v != null && v < 4.9;
+      el.className = th.throttled || th.undervoltage || (v != null && v < 4.75) ? 'bad'
+                   : (lowVolts || (t != null && t >= 75)) ? 'warn' : '';
+      el.title = [
+        th.undervoltage ? 'Under-voltage! The supply is sagging.' : '',
+        lowVolts ? `5V rail at ${v}V — spec is 4.75–5.25V. A sag here is what shuts the Pi off.` : '',
+        th.throttled ? 'Throttling to stay under the temperature limit.' : '',
+        host.online === false ? 'The Pi is not reporting. These are the last readings before it went.' : '',
+      ].filter(Boolean).join('\n') || 'Pi CPU temperature and 5V rail';
+    }
+
+    const setBusy = b => { busy = b; refreshControls(); };
+
+    // ---- screenshot ------------------------------------------------------
+    const shotEl = document.getElementById('shot');
+
+    async function screenshot() {
+      if (!videoEl.videoWidth) { note('Nothing to save — no picture is arriving.'); return; }
+      shotEl.disabled = true;
+      try {
+        const w = videoEl.videoWidth, h = videoEl.videoHeight;
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        // Bake in the rotation. drawImage copies the raw frame and ignores the
+        // CSS transform, so without this a saved shot comes out upside down
+        // relative to what is on screen.
+        if (videoEl.classList.contains('flipped')) {
+          ctx.translate(w, h);
+          ctx.rotate(Math.PI);
+        }
+        ctx.drawImage(videoEl, 0, 0, w, h);
+
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+        if (!blob) { note('Could not encode the frame.'); return; }
+
+        const res = await fetch(`/api/camera/${UID}/screenshot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/png' },
+          body: blob,
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) { note(`Screenshot failed: ${out.error || res.status}`); return; }
+        note(`Saved ${out.file} to ${out.dir}`);
+        setTimeout(() => {
+          if (noteEl.textContent.startsWith('Saved ')) note('');
+        }, 4000);
+      } catch (err) {
+        note(`Screenshot failed: ${err.message}`);
+      } finally {
+        shotEl.disabled = false;
+      }
+    }
+
+    shotEl.addEventListener('click', screenshot);
+    document.addEventListener('keydown', e => {
+      if (e.key === 's' && !e.ctrlKey && !e.metaKey && !e.altKey
+          && !/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) {
+        screenshot();
+      }
     });
 
-    conn.onStream = stream => {
-      videoEl.srcObject = stream ?? null;
-    };
-    conn.connect();
+    // The agent stamps every state message, so only trust one newer than our
+    // request — otherwise the retained result of the previous run looks like a
+    // fresh success.
+    async function waitForOutcome(sentAt) {
+      const deadline = Date.now() + 40000;
+      for (;;) {
+        if (Date.now() > deadline) {
+          note('No confirmation from the Pi after 40s — check pi-webrtc-agent on it.');
+          return;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        const state = await pollState();
+        paintStatus(state);
+        const cfg = state.config;
+        if (!cfg || !(cfg.ts > sentAt)) continue;
+        if (cfg.status === 'applied') { note(''); return; }
+        if (cfg.status === 'error') { note(`Camera rejected it: ${cfg.error || 'unknown error'}`); return; }
+      }
+    }
+
+    // Apply and Restart both bounce units on the Pi, so they share one path:
+    // send, drop the dead peer, wait for the agent to confirm, reconnect.
+    async function runAction(path, body, message) {
+      const sentAt = Date.now() / 1000;
+      setBusy(true);
+      note(message);
+      try {
+        const res = await fetch(`/api/camera/${UID}/${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {}),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          note(`Rejected: ${err.error || res.status}`);
+          return;
+        }
+
+        // Drop the old peer now; it is dead the moment the unit restarts.
+        stopped = true;
+        teardown();
+        stopped = false;
+
+        await waitForOutcome(sentAt);
+      } catch (err) {
+        note(`Request failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+        attempt = 0;
+        connect();
+      }
+    }
+
+    presetEl.addEventListener('change', paintFpsOptions);
+
+    applyEl.addEventListener('click', () => runAction(
+      'config',
+      { preset: presetEl.value, fps: Number(fpsEl.value) },
+      'Restarting the camera to apply — the stream drops for a few seconds.',
+    ));
+
+    restartEl.addEventListener('click', () => runAction(
+      'restart',
+      null,
+      'Re-detecting and restarting every camera on this Pi — all its streams drop for a few seconds.',
+    ));
+
+    window.addEventListener('beforeunload', () => { stopped = true; teardown(); });
+
+    // React to the browser's own online/offline flips: reconnect the moment it
+    // believes it is back, instead of waiting out the retry backoff.
+    window.addEventListener('online', () => { attempt = 0; connect(); });
+    window.addEventListener('offline', () => {
+      setPill('connDot', 'connText', 'bad', 'browser offline');
+      note(offlineHelp());
+    });
+
+    setInterval(async () => {
+      if (busy) return;                     // an action is in flight
+      const state = await pollState();
+      paintStatus(state);
+      paintModes(state);
+    }, 5000);
+
+    pollState()
+      .then(state => { paintStatus(state); paintModes(state); })
+      .finally(connect);
   </script>
 </body>
 </html>

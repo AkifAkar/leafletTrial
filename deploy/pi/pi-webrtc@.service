@@ -1,0 +1,40 @@
+[Unit]
+# One instance per camera: pi-webrtc@camera1, pi-webrtc@camera2, ...
+# %i is the camera uid, which is also what the browser connects to.
+Description=pi-webrtc stream for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pi-webrtc
+
+# device.env is host-wide (broker, extra flags), written once at install time.
+# cameras/%i.env is per-camera (which /dev/video, resolution, fps) and is
+# rewritten by pi-webrtc-agent. The leading '-' means "start anyway if missing";
+# the agent writes it before starting us, so a missing file means it has not run.
+EnvironmentFile=/etc/pi-webrtc/device.env
+EnvironmentFile=-/etc/pi-webrtc/cameras/%i.env
+
+# Note EXTRA_ARGS is written as $EXTRA_ARGS, not ${EXTRA_ARGS}: systemd only
+# word-splits the unbraced form, so ${...} would pass "--a --b" as one argument.
+# Empty expands to nothing, which is fine.
+ExecStart=/opt/pi-webrtc/pi-webrtc \
+  --camera=${CAMERA_SPEC} \
+  --uid=%i \
+  --width=${WIDTH} \
+  --height=${HEIGHT} \
+  --fps=${FPS} \
+  --no-audio \
+  --use-mqtt \
+  --mqtt-host=${MQTT_HOST} \
+  --mqtt-port=${MQTT_PORT} \
+  $EXTRA_ARGS
+
+Restart=always
+RestartSec=5
+
+# Not enabled at boot: pi-webrtc-agent enumerates the cameras and starts the
+# right instances. Enabling these directly would start cameras that may not be
+# plugged in.

@@ -1,0 +1,36 @@
+[Unit]
+Description=pi-webrtc stream (libcamera, single camera)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pi-webrtc
+
+# device.env is host-wide (uid, broker, extra flags), written once at install.
+# stream.env is the resolution/fps, rewritten by pi-webrtc-agent-zero. The
+# leading '-' means "start anyway if missing"; the agent writes it first.
+EnvironmentFile=/etc/pi-webrtc/device.env
+EnvironmentFile=-/etc/pi-webrtc/stream.env
+
+# EXTRA_ARGS is unbraced on purpose: systemd only word-splits $VAR, not ${VAR},
+# so ${EXTRA_ARGS} would pass "--a --b" as a single argument. On a Zero 2 W
+# EXTRA_ARGS defaults to --hw-accel (this SoC has a hardware H.264 encoder).
+ExecStart=/opt/pi-webrtc/pi-webrtc \
+  --camera=${CAMERA_SPEC} \
+  --uid=${DEVICE_UID} \
+  --width=${WIDTH} \
+  --height=${HEIGHT} \
+  --fps=${FPS} \
+  --no-audio \
+  --use-mqtt \
+  --mqtt-host=${MQTT_HOST} \
+  --mqtt-port=${MQTT_PORT} \
+  $EXTRA_ARGS
+
+Restart=always
+RestartSec=5
+
+# Not enabled at boot directly: pi-webrtc-agent-zero starts it after checking
+# the camera is present and writing stream.env.

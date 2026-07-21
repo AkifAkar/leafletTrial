@@ -17,10 +17,9 @@
 <body>
   <div id="map"></div>
 
-  <!-- roslibjs -->
-  <script src="https://unpkg.com/roslib/build/roslib.min.js"></script>
-  <!-- Leaflet JS -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="{{ url_for('static', filename='roslib/roslib.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='leaflet/leaflet.js') }}"></script>
+
 
   <script>
     // 1️⃣ Start ros2-web-bridge separately:
@@ -41,7 +40,7 @@
   // 1️⃣ Initialize at world view (so you don’t assume a start coord)
   const map = L.map('map').setView([0, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
+    maxZoom: 21,
     attribution: '© OpenStreetMap'
   }).addTo(map);
 
@@ -50,28 +49,28 @@
 
   // 3️⃣ Subscribe to GPS topic
   const gpsTopic = new ROSLIB.Topic({
-    ros,
-    name: '/gps/fix',
-    messageType: 'sensor_msgs/NavSatFix'
-  });
+  ros,
+  name: '/fix',                              // match ros2 topic list!
+  messageType: 'sensor_msgs/msg/NavSatFix'   // ROS 2 style
+});
 
-  gpsTopic.subscribe((msg) => {
-    const lat = msg.latitude,
-          lon = msg.longitude;
+gpsTopic.subscribe((msg) => {
+  // Skip no-fix / invalid messages (status -1 = STATUS_NO_FIX, NaN coords)
+  if (msg.status.status < 0 || !isFinite(msg.latitude) || !isFinite(msg.longitude)) {
+    console.warn('No GPS fix, skipping update');
+    return;
+  }
 
-    // Always move the marker
-    marker.setLatLng([lat, lon]);
+  const lat = msg.latitude, lon = msg.longitude;
+  marker.setLatLng([lat, lon]);
 
-    if (firstFix) {
-      // 🔍 Zoom in once at level 16
-      map.setView([lat, lon], 20);
-      firstFix = false;
-    }
-    else if (!map.getBounds().contains([lat, lon])) {
-      // ↗️ Only pan if marker leaves current view
-      map.panTo([lat, lon]);
-    }
-  });
+  if (firstFix) {
+    map.setView([lat, lon], 20);
+    firstFix = false;
+  } else if (!map.getBounds().contains([lat, lon])) {
+    map.panTo([lat, lon]);
+  }
+});
 
 
   </script>

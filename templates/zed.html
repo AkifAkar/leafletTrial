@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ROS Image Viewer</title>
+  <style>
+    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background:#111; }
+    img  { max-width: 90vw; max-height: 90vh; background: #000; }
+    #status { position: fixed; top: 10px; left: 10px; color: #0f0; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div id="status">Connecting…</div>
+  <img id="cam" alt="ROS camera stream"/>
+
+  <!-- roslib.js from your local static folder -->
+  <script src="{{ url_for('static', filename='roslib/roslib.min.js') }}"></script>
+  <script>
+    const ros = new ROSLIB.Ros({ url: "{{ rosbridge_url }}" });
+
+    ros.on('connection', () => {
+      document.getElementById('status').textContent = 'Connected';
+      document.getElementById('status').style.color = '#0f0';
+    });
+
+    ros.on('error', (err) => {
+      document.getElementById('status').textContent = 'Error: ' + err;
+      document.getElementById('status').style.color = '#f00';
+    });
+
+    ros.on('close', () => {
+      document.getElementById('status').textContent = 'Disconnected';
+      document.getElementById('status').style.color = '#f90';
+    });
+
+    // Subscribe to your image topic
+    const imgListener = new ROSLIB.Topic({
+  ros         : ros,
+  name        : "{{ image_topic }}",          // e.g. /zed/zed_node/rgb_raw/image_raw_color/compressed
+  messageType : "sensor_msgs/msg/CompressedImage",
+  queue_length: 1
+});
+
+const camEl = document.getElementById('cam');
+let lastURL = null;
+
+imgListener.subscribe(msg => {
+  console.log(msg)
+  // msg.format might be "bgra8; jpeg compressed bgr8" -> treat as JPEG
+  const isJPEG = msg.format && msg.format.toLowerCase().includes('jpeg');
+
+  // If data is already a base64 string, just use it
+  if (typeof msg.data === 'string') {
+    camEl.src = 'data:image/jpeg;base64,' + msg.data;
+    return;
+  }
+
+  // Otherwise it's an array/typedarray -> make a Blob URL
+  const bytes = (msg.data instanceof Uint8Array) ? msg.data : new Uint8Array(msg.data);
+  const blob  = new Blob([bytes], { type: isJPEG ? 'image/jpeg' : 'image/png' });
+
+  if (lastURL) URL.revokeObjectURL(lastURL);   // avoid memory leaks
+  lastURL = URL.createObjectURL(blob);
+  camEl.src = lastURL;
+});
+
+  </script>
+</body>
+</html>

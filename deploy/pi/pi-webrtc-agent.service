@@ -1,0 +1,15 @@
+[Unit]
+Description=pi-webrtc camera agent (enumerates v4l2, runs one pi-webrtc per camera)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/pi-webrtc/device.env
+ExecStart=/usr/bin/python3 /usr/local/bin/pi-webrtc-agent.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
